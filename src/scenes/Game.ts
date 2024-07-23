@@ -4,13 +4,14 @@ const cellXCount = 160;
 const cellYCount = 90;
 const edgeCount = 6; // number of cells to calculate beyond each edge of the game area
 const updatesPerMinute = 1;
-const fadeRate = 0.1; // 0-1 (no fade to immediate fade)
+const fadeRate = 0.5; // 0-1 (no fade to immediate fade)
 const cellColor = 0x333333;
-const historyColor = 0x333333;
 const backgroundColor = 0xffffff;
 
 const totalXCount = cellXCount + edgeCount * 2;
 const totalYCount = cellYCount + edgeCount * 2;
+
+const historyLimit = 10;
 
 export class Game extends Scene {
     cellXSize: number;
@@ -21,11 +22,10 @@ export class Game extends Scene {
     elapsedTime: number;
     cells: Cell[];
     stagingCells: number[];
-    canvas: Phaser.GameObjects.Graphics;
-    historyCellSprite: Phaser.GameObjects.Container | null;
-    currentCellsSprite: Phaser.GameObjects.Container | null;
-    histCanvas: Phaser.GameObjects.Graphics;
+    canvasIndex: number;
+    buffer: Phaser.GameObjects.Graphics[];
     stepMode: boolean;
+    historyCount: number;
 
     constructor() {
         super("Game");
@@ -33,6 +33,13 @@ export class Game extends Scene {
         this.stagingCells = [];
         this.elapsedTime = 0;
         this.stepMode = false;
+        this.historyCount = 0;
+        this.canvasIndex = 1;
+        this.buffer = [];
+    }
+
+    get canvas() {
+        return this.buffer[this.canvasIndex];
     }
 
     preload() { }
@@ -55,30 +62,13 @@ export class Game extends Scene {
             this.setCellNeighbors(i);
         }
 
-        this.canvas = this.add.graphics();
+        this.buffer.push(this.add.graphics());
+        this.buffer.push(this.add.graphics());
 
-        this.canvas.fillStyle(backgroundColor);
-        this.canvas.fillRect(
-            0,
-            0,
-            this.cellXSize * cellXCount,
-            this.cellYSize * cellYCount,
-        );
-        this.histCanvas = this.add.graphics();
+        this.fillBackground(false);
 
-        this.add.container(0, 0, [this.canvas]);
-        this.input.on(
-            "pointermove",
-            function(pointer: any) {
-                if (pointer.isDown) {
-                    this.cells[
-                        Math.floor(pointer.x / this.cellXSize + edgeCount) +
-                        totalXCount * Math.floor(pointer.y / this.cellYSize + edgeCount)
-                    ].alive = true;
-                }
-            },
-            this,
-        );
+        this.input.on("pointermove", this.getMouseInputFunction(true), this);
+        this.input.on("pointerdown", this.getMouseInputFunction(false), this);
 
         document.getElementById("step")?.addEventListener("click", () => {
             this.stepMode = true;
@@ -92,6 +82,7 @@ export class Game extends Scene {
             for (let cell of this.cells) {
                 cell.alive = false;
             }
+            this.fillBackground(false);
         });
         document.getElementById("random")?.addEventListener("click", () => {
             const rdg = new Phaser.Math.RandomDataGenerator();
@@ -100,6 +91,7 @@ export class Game extends Scene {
             }
         });
     }
+
     update(_: number, delta: number): void {
         this.elapsedTime += delta;
 
@@ -107,6 +99,8 @@ export class Game extends Scene {
             this.elapsedTime -= 60 / updatesPerMinute;
             if (!this.stepMode) this.step();
         }
+        if (this.stepMode) this.fillBackground(false);
+        this.drawCells();
     }
 
     step() {
@@ -120,44 +114,34 @@ export class Game extends Scene {
         for (var i = 0; i < this.stagingCells.length; i++) {
             this.cells[i].alive = this.stagingCells[i] === 1;
         }
-        if (this.currentCellsSprite?.data?.count) {
-            this.currentCellsSprite?.removeAll();
-            this.currentCellsSprite.destroy();
-        }
+        this.fillBackground(true);
+    }
 
-        const canvas = this.add.graphics();
-        canvas.fillStyle(0x333333);
-
-        const histCanvas = this.add.graphics();
-        if (this.historyCellSprite !== null) {
-            histCanvas.fillRect(0, 0, this.screenWidth, this.screenHeight);
-        }
-
-        if (this.historyCellSprite?.data?.count) {
-            this.historyCellSprite?.removeAll();
-            this.historyCellSprite.destroy();
-        }
-
-        histCanvas.fillStyle(backgroundColor, fadeRate);
-        histCanvas.fillRect(
+    fillBackground(faded: boolean) {
+        this.historyCount++;
+        if (this.historyCount > historyLimit) this.swapBuffer();
+        this.canvas.fillStyle(backgroundColor, faded ? fadeRate : 1);
+        this.canvas.fillRect(
             0,
             0,
             this.cellXSize * cellXCount,
             this.cellYSize * cellYCount,
         );
+    }
+    swapBuffer() {
+        this.canvas.depth = 0;
+        this.canvasIndex = (this.canvasIndex + 1) % 2;
+        this.canvas.depth = 10;
+        this.canvas.clear();
+        this.historyCount = 0;
+    }
 
-        histCanvas.fillStyle(0x553a3a, 1);
-
+    drawCells() {
+        this.canvas.fillStyle(cellColor);
         for (var x = 0; x < cellXCount; x++) {
             for (var y = 0; y < cellYCount; y++) {
                 if (this.cells[x + edgeCount + totalXCount * (y + edgeCount)].alive) {
-                    canvas.fillRect(
-                        x * this.cellXSize,
-                        y * this.cellYSize,
-                        this.cellXSize,
-                        this.cellYSize,
-                    );
-                    histCanvas.fillRect(
+                    this.canvas.fillRect(
                         x * this.cellXSize,
                         y * this.cellYSize,
                         this.cellXSize,
@@ -166,10 +150,20 @@ export class Game extends Scene {
                 }
             }
         }
-
-        //this.historyCellSprite = this.add.container(0, 0, [histCanvas]);
-        //this.currentCellsSprite = this.add.container(0, 0, [canvas]);
     }
+
+    getMouseInputFunction(onlyPlace: boolean) {
+        const mouseInput = (pointer: Phaser.Input.Pointer) => {
+            if (pointer.isDown) {
+                const x = Math.floor(pointer.x / this.cellXSize + edgeCount);
+                const y = Math.floor(pointer.y / this.cellYSize + edgeCount);
+                const index = x + totalXCount * y;
+                this.cells[index].alive = onlyPlace ? true : !this.cells[index].alive;
+            }
+        };
+        return mouseInput;
+    }
+
     getNewCellStatus(index: number) {
         let retVal = null;
         let currentStatus = this.cells[index].alive;
